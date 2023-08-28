@@ -21,42 +21,7 @@ const
 type
   LdrLoadDll_t* = proc (PathToFile: PWCHAR, Flags: ULONG, ModuleFileName: PUNICODE_STRING, ModuleHandle: PHANDLE): NTSTATUS {.stdcall.}
   
-type
-  ND_LDR_DATA_TABLE_ENTRY* {.bycopy.} = object
-    InMemoryOrderLinks*: LIST_ENTRY
-    InInitializationOrderLinks*: LIST_ENTRY
-    DllBase*: PVOID
-    EntryPoint*: PVOID
-    SizeOfImage*: ULONG
-    FullDllName*: UNICODE_STRING
-    BaseDllName*: UNICODE_STRING
 
-  PND_LDR_DATA_TABLE_ENTRY* = ptr ND_LDR_DATA_TABLE_ENTRY
-  ND_PEB_LDR_DATA* {.bycopy.} = object
-    Length*: ULONG
-    Initialized*: UCHAR
-    SsHandle*: PVOID
-    InLoadOrderModuleList*: LIST_ENTRY
-    InMemoryOrderModuleList*: LIST_ENTRY
-    InInitializationOrderModuleList*: LIST_ENTRY
-
-  PND_PEB_LDR_DATA* = ptr ND_PEB_LDR_DATA
-  ND_PEB* {.bycopy.} = object
-    Reserved1*: array[2, BYTE]
-    BeingDebugged*: BYTE
-    Reserved2*: array[1, BYTE]
-    Reserved3*: array[2, PVOID]
-    Ldr*: PND_PEB_LDR_DATA
-
-  PND_PEB* = ptr ND_PEB
-
-
-proc GetPPEB(p: culong): P_PEB {. 
-    header: 
-        """#include <windows.h>
-           #include <winnt.h>""", 
-    importc: "__readgsqword"
-.}
 
 
 
@@ -74,13 +39,9 @@ proc `-`[T](a: ptr T, b: int): ptr T =
     cast[ptr T](cast[uint](a) - cast[uint](b * a[].sizeof))
 
 
-### Alternative for PEB x64 only
-
-#[
 
 type
-  LDR_DATA_TABLE_ENTRY* {.bycopy.} = object
-    InLoadOrderModuleList*: LIST_ENTRY
+  LDR_DATA_TABLE_ENTRY_N* {.bycopy.} = object
     InMemoryOrderModuleList*: LIST_ENTRY
     InInitializationOrderModuleList*: LIST_ENTRY
     DllBase*: PVOID
@@ -91,14 +52,12 @@ type
     Flags*: ULONG              ##  LDR_*
     LoadCount*: USHORT
     TlsIndex*: USHORT
-    HashLinks*: LIST_ENTRY
-    SectionPointer*: PVOID
-    CheckSum*: ULONG
+    HashTableEntry*: LIST_ENTRY
     TimeDateStamp*: ULONG ##     PVOID			LoadedImports;					// seems they are exist only on XP !!!
                         ##     PVOID			EntryPointActivationContext;	// -same-
-  PLDR_DATA_TABLE_ENTRY* = ptr LDR_DATA_TABLE_ENTRY
+  PLDR_DATA_TABLE_ENTRY_N* = ptr LDR_DATA_TABLE_ENTRY_N
 
-  PEB_LDR_DATA* {.bycopy.} = object
+  PEB_LDR_DATA_N* {.bycopy.} = object
     Length*: ULONG
     Initialized*: BOOLEAN
     SsHandle*: PVOID
@@ -106,15 +65,15 @@ type
     InMemoryOrderModuleList*: LIST_ENTRY
     InInitializationOrderModuleList*: LIST_ENTRY
 
-  PPEB_LDR_DATA* = ptr PEB_LDR_DATA
+  PPEB_LDR_DATA_N* = ptr PEB_LDR_DATA_N
 
-  RTL_DRIVE_LETTER_CURDIR* {.bycopy.} = object
+  RTL_DRIVE_LETTER_CURDIR_N* {.bycopy.} = object
     Flags*: USHORT
     Length*: USHORT
     TimeStamp*: ULONG
     DosPath*: UNICODE_STRING
 
-  RTL_USER_PROCESS_PARAMETERS* {.bycopy.} = object
+  RTL_USER_PROCESS_PARAMETERS_N* {.bycopy.} = object
     MaximumLength*: ULONG
     Length*: ULONG
     Flags*: ULONG
@@ -143,17 +102,18 @@ type
     DesktopName*: UNICODE_STRING
     ShellInfo*: UNICODE_STRING
     RuntimeData*: UNICODE_STRING
-    DLCurrentDirectory*: array[0x20, RTL_DRIVE_LETTER_CURDIR]
-
-  PEB* {.bycopy.} = object
+    DLCurrentDirectory*: array[0x20, RTL_DRIVE_LETTER_CURDIR_N]
+  PRTL_USER_PROCESS_PARAMETERS_N* = ptr RTL_USER_PROCESS_PARAMETERS_N
+  
+  PEB_N* {.bycopy.} = object
     InheritedAddressSpace*: BOOLEAN
     ReadImageFileExecOptions*: BOOLEAN
     BeingDebugged*: BOOLEAN
     Spare*: BOOLEAN
     Mutant*: HANDLE
     ImageBaseAddress*: PVOID
-    Ldr*: PPEB_LDR_DATA
-    ProcessParameters*: PRTL_USER_PROCESS_PARAMETERS
+    Ldr*: PPEB_LDR_DATA_N
+    ProcessParameters*: PRTL_USER_PROCESS_PARAMETERS_N
     SubSystemData*: PVOID
     ProcessHeap*: PVOID
     FastPebLock*: PVOID
@@ -201,23 +161,18 @@ type
     TlsExpansionBitmapBits*: array[0x80, BYTE]
     SessionId*: ULONG
 
-  PPEB* = ptr PEB
+  PPEB_N* = ptr PEB_N
+
+proc GetPPEB(p: culong): P_PEB {. 
+    header: 
+        """#include <windows.h>
+           #include <winnt.h>""", 
+    importc: "__readgsqword"
+.}
 
 {.passC:"-masm=intel".}
 
-proc GetPEB*(): PPEB {.asmNoStackFrame.} =
-    # GetPEBAsm64 proc
-    asm """
-        push rbx
-        xor rbx,rbx
-        xor rax,rax
-        mov rbx, qword ptr gs:[0x30]
-        mov rax, rbx
-        pop rbx
-        ret
-    """
-    # GetPEBAsm64 endp
-]#
+
 ## Alternative end
 
 proc is_dll*(hLibrary: PVOID): BOOL
@@ -253,6 +208,43 @@ proc is_dll*(hLibrary: PVOID): BOOL =
   #echo "Everything fine, this is indeed a DLL"
   return TRUE
 
+proc is_executable(protect: DWORD): bool =
+  result = (protect and PAGE_EXECUTE) == PAGE_EXECUTE or 
+           (protect and PAGE_EXECUTE_READ) == PAGE_EXECUTE_READ or
+           (protect and PAGE_EXECUTE_READWRITE) == PAGE_EXECUTE_READWRITE or
+           (protect and PAGE_EXECUTE_WRITECOPY) == PAGE_EXECUTE_WRITECOPY
+
+proc scan_sections(hMod: HMODULE): bool =
+  var
+    dosHeader: PIMAGE_DOS_HEADER
+    ntHeaders: PIMAGE_NT_HEADERS
+    section: PIMAGE_SECTION_HEADER
+    memInfo: MEMORY_BASIC_INFORMATION
+  dosHeader = cast[PIMAGE_DOS_HEADER](hMod)
+  if dosHeader.e_magic != IMAGE_DOS_SIGNATURE:
+    return false
+
+  ntHeaders = cast[PIMAGE_NT_HEADERS](cast[int](hMod) + dosHeader.e_lfanew)
+  if ntHeaders.Signature != IMAGE_NT_SIGNATURE:
+    return false
+
+  section = cast[PIMAGE_SECTION_HEADER](cast[int](ntHeaders) + sizeof(IMAGE_NT_HEADERS))
+  for i in 0..<cast[int](ntHeaders.FileHeader.NumberOfSections):
+    let sectionStart: int = cast[int](hMod) + cast[PIMAGE_SECTION_HEADER](section + i*sizeof(IMAGE_SECTION_HEADER)).VirtualAddress
+    let sectionEnd: int = sectionStart + cast[PIMAGE_SECTION_HEADER](section + i*sizeof(IMAGE_SECTION_HEADER)).Misc.VirtualSize
+
+    var currentAddress = sectionStart
+    while currentAddress < sectionEnd:
+      if VirtualQuery(cast[PVOID](currentAddress), addr memInfo, sizeof(MEMORY_BASIC_INFORMATION)) == 0:
+        raise newException(Exception, "Failed to query memory info")
+      echo fmt"current address: {currentAddress:#X}, prot:{memInfo.Protect:#X}"
+      if is_executable(memInfo.Protect):
+        return true
+
+      currentAddress = cast[int](memInfo.BaseAddress) + cast[int](memInfo.RegionSize)
+
+  return false
+
 
 ##
 ##  Get the base address of a DLL
@@ -261,21 +253,35 @@ proc is_dll*(hLibrary: PVOID): BOOL =
 
 proc get_library_address*(LibName: LPWSTR; DoLoad: BOOL): HANDLE =
   when not defined(release):
-      echo "\r\n[*] Parsing the PEB to search for the target DLL\r\n"
-  var Peb: PPEB = GetPPEB(PEB_OFFSET)
+      echo "[*] Parsing the PEB to search for the target DLL"
+  var oldpeb = GetPPEB(PEB_OFFSET)
+  var Peb: PPEB_N = cast[PPEB_N](GetPPEB(PEB_OFFSET))
+  echo fmt"PEB @{cast[int](Peb):#X}"
   var Ldr = Peb.Ldr
-  var FirstEntry: PVOID = addr(Ldr.InMemoryOrderModuleList.Flink)
-  var Entry: PND_LDR_DATA_TABLE_ENTRY = cast[PND_LDR_DATA_TABLE_ENTRY](Ldr.InMemoryOrderModuleList.Flink)
+
+  var FirstEntry: PVOID = Ldr.InMemoryOrderModuleList.Blink
+  echo fmt"List @{cast[int](Ldr.InMemoryOrderModuleList):#X} against {cast[int](oldpeb.Ldr.InMemoryOrderModuleList):#X}"
+  
+  echo fmt"FE @{cast[int](FirstEntry):#X} against {cast[int](oldpeb.Ldr.InMemoryOrderModuleList.Blink):#X}"
+  var Entry: PLDR_DATA_TABLE_ENTRY_N = cast[PLDR_DATA_TABLE_ENTRY_N](Ldr.InMemoryOrderModuleList.Blink)
   while true:
     # lstrcmpiW is not case sensitive, lstrcmpW is case sensitive
     var compare: int = lstrcmpiW(LibName,cast[LPWSTR](Entry.BaseDllName.Buffer))
+    echo "DLL in PEB:", Entry.BaseDllName
     if(compare == 0):
       #echo "DLL names equal"
-      when not defined(release):
-          echo "\r\n[+] Found the DLL!\r\n"
-      return cast[HANDLE](Entry.DllBase)
-    Entry = cast[PND_LDR_DATA_TABLE_ENTRY](Entry.InMemoryOrderLinks.Flink)
-    if not (Entry != FirstEntry):
+      if scan_sections(cast[HANDLE](Entry.DllBase)):
+        when not defined(release):
+          echo fmt"[+] Found the DLL! @{cast[int](Entry.DllBase):#X}"
+        return cast[HANDLE](Entry.DllBase)
+      else:
+        echo "[!] DLL is not executable, freeing..."
+        FreeLibrary(cast[HANDLE](Entry.DllBase))
+        return get_library_address(LibName, DoLoad)
+
+
+    Entry = cast[PLDR_DATA_TABLE_ENTRY_N](Entry.InMemoryOrderModuleList.Blink)
+    if not (Entry != cast[PLDR_DATA_TABLE_ENTRY_N](cast[int](FirstEntry))): 
       when not defined(release):
           echo "DLL not found for the current proc, loading."
       break
@@ -347,7 +353,7 @@ proc get_function_address*(hLibrary: HMODULE; fname: cstring; ordinal: int, spec
   var addressOfFunctionsvalue = RVA2VA(PDWORD, cast[PVOID](hLibrary), exp.AddressOfFunctions)[]
   var names = RVA2VA(PDWORD, cast[PVOID](hLibrary), exp.AddressOfNames)[]
 
-  echo "\r\n[*] Checking DLL's Export Directory for the target function\r\n"
+  echo "[*] Checking DLL's Export Directory for the target function"
 
   if fname != "":
     ##  iterate over all the exports
@@ -383,8 +389,8 @@ proc get_function_address*(hLibrary: HMODULE; fname: cstring; ordinal: int, spec
         if (funcname == "GetModuleFileNameW"):
           functions = functions - 1
 
-        echo "\r\n[+] Found API call: ",funcname
-        echo "\r\n"
+        echo "[+] Found API call: ",funcname
+        echo ""
         
         # Strange. For ntdll functions the following is needed, but for kernel32 functions it's not. Don't ask me why. This is a workaround for the moment. Need to troubleshoot.
         if (specialCase):
